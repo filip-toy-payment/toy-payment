@@ -125,7 +125,7 @@ The parser is flexible about form. A row that holds the data its transaction typ
 | Case of the type | Ignored. `DEPOSIT` and `Deposit` are deposits. |
 | Dispute, resolve and chargeback rows | May have three fields or four. |
 | More than four fields | A deposit or withdrawal is rejected. Its amount is then ambiguous. `1,000.50` would otherwise be read as 1. A dispute, resolve or chargeback ignores the extra fields. |
-| Quotes | A double quote is an ordinary character. CSV quoting would let one stray quote swallow every later row. |
+| Quotes | Standard CSV quoting. A field may be wrapped in double quotes. A quote that is opened and never closed is a known limit. See [Known limits](#known-limits). |
 | Client and tx numbers | Read by the `csv` crate. It also accepts a leading plus sign and hexadecimal such as `0x10`. |
 | Blank lines | Skipped. |
 | Line endings | Unix line endings are assumed. |
@@ -176,8 +176,8 @@ The sample data is in `tests/fixtures`. Each `<name>.csv` is an input. The match
 | `basic` | Deposits and withdrawals. One withdrawal fails. |
 | `disputes` | Dispute, resolve, a second dispute, chargeback, a locked account, a negative balance |
 | `ignored_rows` | Rows the specification says to ignore |
-| `bad_rows` | Fifteen faulty rows |
-| `formatting` | Mixed case, extra whitespace, unusual number forms, extra fields on a dispute |
+| `bad_rows` | Thirteen faulty rows |
+| `formatting` | Mixed case, extra whitespace, unusual number forms, quoted fields, extra fields on a dispute |
 | `swapped_header` | A header in the wrong order. The run must fail. There is no expected output. |
 | `no_header` | A file that starts with a transaction |
 | `precision` | Sums that floats get wrong and a 20 digit amount |
@@ -234,7 +234,7 @@ All dependencies were checked with `cargo deny check advisories` against the Rus
 
 ### Streaming
 
-The input is read as a stream with the `csv` crate. A row is dropped as soon as it has been applied. The file is never loaded into memory.
+The input is read as a stream with the `csv` crate. A row is dropped as soon as it has been applied. The file is never loaded into memory. The one exception is a quote that is never closed. See [Known limits](#known-limits).
 
 Measured with the release build on a laptop, single threaded:
 
@@ -279,7 +279,15 @@ The specification asks what would change if the CSVs came from thousands of conc
 
 - **Log lines name the record. They do not name the line.** The record number counts rows from 1. A header counts as a record. Blank lines do not. In a file without blank lines the record number is the line number. The `csv` crate does not report a reliable line for a row that follows blank lines.
 - **Columns are read by position.** A header that lists the columns in another order stops the run. It is not reordered.
-- **Quoted fields are not supported.** A quote is taken as part of the field.
+- **A double quote that is opened and never closed loses the rows after it.** The CSV reader takes everything up to the next quote as one field. If there is no next quote, that is the rest of the file. Only one bad row is logged for all of it. The run still exits with 0. The swallowed text is held in memory. That also breaks the streaming for that file.
+
+  ```
+  deposit,1,1,"5
+  deposit,1,2,3
+  deposit,2,3,4
+  ```
+
+  This input logs `record 1: amount is not a decimal number` and prints no accounts. Rows two and three are part of the amount of row one. Turning quoting off would confine the damage to one row. It was left on so that files with quoted fields are read correctly.
 - **A row with invalid UTF-8 is rejected whole.** This holds even when the bad byte is in a field the transaction does not need.
 - **Some log text comes from dependencies.** A row with too few fields is explained in the words of the `csv` and `serde` crates.
 - **All state is in memory.** See [What is kept in memory](#what-is-kept-in-memory).

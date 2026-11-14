@@ -116,9 +116,6 @@ pub fn rows<R: Read>(input: R) -> Result<impl Iterator<Item = io::Result<Row>>, 
         .trim(csv::Trim::All)
         // Rows may have three fields or more than four.
         .flexible(true)
-        // A quote is an ordinary character. Quoting would let one stray quote
-        // swallow every later row into a single field.
-        .quoting(false)
         .from_reader(input);
 
     // `headers` returns the first record without consuming it.
@@ -374,24 +371,23 @@ mod tests {
     }
 
     #[test]
-    fn a_quote_is_an_ordinary_character() {
+    fn reads_quoted_fields() {
         assert_eq!(
-            one_error("\"deposit\",1,2,3.5\n"),
-            RowError::UnknownKind("\"deposit\"".to_owned())
+            one("\"deposit\",\"1\",\"2\",\"3.5\"\n"),
+            transaction(Kind::Deposit, 1, 2, Some("3.5"))
+        );
+        assert_eq!(
+            read("\"type\",\"client\",\"tx\",\"amount\"\n\"dispute\",\"1\",\"2\"\n").len(),
+            1
         );
     }
 
     #[test]
-    fn a_stray_quote_damages_only_its_own_row() {
-        let rows = read("deposit,1,1,\"5\ndeposit,1,2,3\ndeposit,2,3,4\n");
-
-        assert_eq!(rows.len(), 3);
+    fn a_comma_inside_a_quoted_amount_is_part_of_the_amount() {
         assert_eq!(
-            rows[0].transaction,
-            Err(RowError::Amount(AmountError::Malformed))
+            one_error("deposit,1,1,\"1,000.50\"\n"),
+            RowError::Amount(AmountError::Malformed)
         );
-        assert!(rows[1].transaction.is_ok());
-        assert!(rows[2].transaction.is_ok());
     }
 
     #[test]

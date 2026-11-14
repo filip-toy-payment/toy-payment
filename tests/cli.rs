@@ -75,7 +75,7 @@ fn bad_rows_are_skipped_and_logged() {
 
     assert_eq!(
         logged_records(&diagnostics),
-        [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
 }
 
