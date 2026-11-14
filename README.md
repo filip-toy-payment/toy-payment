@@ -37,6 +37,8 @@ client,available,held,total,locked
 
 Run the tests with `cargo test`. Run the lints with `cargo clippy --all-targets`.
 
+Rust 1.85 or newer is required. The crate uses the 2024 edition.
+
 ## Structure
 
 The crate is a library with a thin binary on top.
