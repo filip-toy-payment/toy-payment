@@ -28,6 +28,8 @@ pub enum RunError {
     Diagnostics(#[source] io::Error),
     #[error(transparent)]
     Output(#[from] OutputError),
+    #[error("record {record}: the engine broke one of its own rules: {rejection}")]
+    EngineFault { record: u64, rejection: Rejection },
 }
 
 /// Processes every transaction in `input` and writes the accounts to `output`.
@@ -52,10 +54,14 @@ where
         let logged = match transaction {
             Err(error) => writeln!(diagnostics, "record {record}: {error}"),
             Ok(transaction) => match engine.apply(transaction) {
-                Err(rejection) if is_data_fault(&rejection) => {
-                    writeln!(diagnostics, "record {record}: {rejection}")
-                }
-                _ => Ok(()),
+                Ok(()) => Ok(()),
+                Err(rejection) => match Severity::of(&rejection) {
+                    Severity::Ordinary => Ok(()),
+                    Severity::DataFault => writeln!(diagnostics, "record {record}: {rejection}"),
+                    Severity::EngineFault => {
+                        return Err(RunError::EngineFault { record, rejection });
+                    }
+                },
             },
         };
         logged.map_err(RunError::Diagnostics)?;
@@ -69,22 +75,36 @@ where
     Ok(())
 }
 
-/// Whether a rejection means the input data is wrong.
-///
-/// Such a row is logged. Every other rejection is an ordinary outcome and
-/// passes quietly.
-fn is_data_fault(rejection: &Rejection) -> bool {
-    // No wildcard arm. A new rejection must be sorted into one group here.
-    match rejection {
-        Rejection::MissingAmount
-        | Rejection::DuplicateTransaction
-        | Rejection::Account(AccountError::Arithmetic(_) | AccountError::InsufficientHeld) => true,
-        Rejection::UnknownDeposit
-        | Rejection::ClientMismatch
-        | Rejection::AlreadyDisputed
-        | Rejection::NotDisputed
-        | Rejection::AlreadyChargedBack
-        | Rejection::Account(AccountError::Locked | AccountError::InsufficientFunds) => false,
+/// What a rejection means for the run.
+#[derive(Debug, PartialEq, Eq)]
+enum Severity {
+    /// An outcome the specification says to ignore. The row passes quietly.
+    Ordinary,
+    /// The input data is wrong. The row is logged and the run continues.
+    DataFault,
+    /// No input can cause this. The engine has a bug and the run stops.
+    EngineFault,
+}
+
+impl Severity {
+    fn of(rejection: &Rejection) -> Self {
+        // No wildcard arm. A new rejection must be sorted into one group here.
+        match rejection {
+            Rejection::UnknownDeposit
+            | Rejection::ClientMismatch
+            | Rejection::AlreadyDisputed
+            | Rejection::NotDisputed
+            | Rejection::AlreadyChargedBack
+            | Rejection::Account(AccountError::Locked | AccountError::InsufficientFunds) => {
+                Self::Ordinary
+            }
+            Rejection::MissingAmount
+            | Rejection::DuplicateTransaction
+            | Rejection::Account(AccountError::Arithmetic(_)) => Self::DataFault,
+            // Held funds always cover a deposit under dispute. The engine
+            // resolves or charges back only such a deposit.
+            Rejection::Account(AccountError::InsufficientHeld) => Self::EngineFault,
+        }
     }
 }
 
@@ -248,6 +268,14 @@ mod tests {
              2,0,0,0,false\n"
         );
         assert_eq!(diagnostics, "");
+    }
+
+    #[test]
+    fn held_funds_that_do_not_cover_a_dispute_are_an_engine_fault() {
+        // No input reaches this state. Only the classification can be tested.
+        let rejection = Rejection::Account(AccountError::InsufficientHeld);
+
+        assert_eq!(Severity::of(&rejection), Severity::EngineFault);
     }
 
     #[test]
