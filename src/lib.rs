@@ -7,4 +7,5 @@ pub mod account;
 pub mod amount;
 pub mod engine;
 pub mod input;
+pub mod output;
 pub mod transaction;
