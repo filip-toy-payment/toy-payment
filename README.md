@@ -32,7 +32,7 @@ client,available,held,total,locked
 | Exit code | Meaning |
 |---|---|
 | 0 | The whole input was processed and the accounts were written. |
-| 1 | Reading the input failed. Or writing the output or the log failed. No accounts are printed. |
+| 1 | Reading the input failed or its header is wrong. Or writing the output or the log failed. No accounts are printed. |
 | 2 | Wrong invocation. Exactly one argument is required. |
 
 Run the tests with `cargo test`. Run the lints with `cargo clippy --all-targets`.
@@ -88,7 +88,9 @@ A chargeback locks the account. A locked account rejects deposits and withdrawal
 
 ### Client accounts
 
-Every transaction that reaches the engine creates the account of the client it names. This includes a withdrawal that fails and a dispute that is ignored. Such a client appears in the output with zero balances.
+A deposit or a withdrawal creates the account of the client it names. That holds even when the transaction is then rejected. A client whose only row is a withdrawal that fails appears in the output with zero balances.
+
+A dispute, a resolve or a chargeback never creates an account. The specification says to ignore such a row when it does not match a deposit. An ignored row leaves no trace in the output.
 
 A row that cannot be parsed into a transaction creates no account.
 
@@ -100,7 +102,7 @@ A row that cannot be parsed into a transaction creates no account.
 | More than four decimal places | Accepted only if the extra digits are zeros. `1.50000` is `1.5`. `1.23456` is rejected. The engine never rounds or truncates an amount. |
 | Accepted number forms | Plain decimals as read by the exact parser of `rust_decimal`. This includes `+1.5`, `.5`, `5.` and `1_000.5`. Scientific notation such as `1e3` is rejected. |
 | Largest amount and balance | 7922816251426433759354395.0335. A row that would take a balance beyond it is rejected. The account is left unchanged. See [Exact arithmetic](#exact-arithmetic). |
-| Missing amount on a deposit or withdrawal | The transaction is rejected by the engine. |
+| Missing amount on a deposit or withdrawal | The row is rejected. |
 
 ### Transaction IDs
 
@@ -117,11 +119,14 @@ The parser is flexible about form. A row that holds the data its transaction typ
 | Case | Behavior |
 |---|---|
 | Header line | Optional. The first line is a header if its first field is `type`. Otherwise it is a transaction. |
+| Header names | A header must name the columns type, client, tx and amount in that order. Any other header stops the run. Swapped columns would otherwise produce wrong balances without any error. |
 | Column order | Fixed: type, client, tx, amount. Columns are read by position. |
 | Whitespace around fields | Trimmed. |
 | Case of the type | Ignored. `DEPOSIT` and `Deposit` are deposits. |
 | Dispute, resolve and chargeback rows | May have three fields or four. |
-| Fields after the fourth | Dropped. |
+| More than four fields | A deposit or withdrawal is rejected. Its amount is then ambiguous. `1,000.50` would otherwise be read as 1. A dispute, resolve or chargeback ignores the extra fields. |
+| Quotes | A double quote is an ordinary character. CSV quoting would let one stray quote swallow every later row. |
+| Client and tx numbers | Read by the `csv` crate. It also accepts a leading plus sign and hexadecimal such as `0x10`. |
 | Blank lines | Skipped. |
 | Line endings | Unix line endings are assumed. |
 
@@ -140,7 +145,7 @@ The type system carries several of the rules.
 - **`ClientId` and `TxId` are distinct types.** Passing one where the other is expected does not compile.
 - **`Account` derives its total.** It stores available and held funds. The total is computed from them. The three values cannot disagree.
 - **`Account` guards its own rules.** Its fields are private. No caller can make held funds negative.
-- **A stored deposit has its own type.** Its amount is not optional. The check for a missing amount happens once, when the deposit arrives.
+- **A stored deposit has its own type.** Its amount is not optional. The check for a missing amount happens once. It happens when the deposit arrives.
 - **Fallible operations return a `Result` with a named error.** Nothing returns a bare `Option` or panics.
 
 Every account operation computes all new values first. It writes them only when every check has passed. A transaction applies in full or changes nothing.
@@ -159,8 +164,8 @@ The third point is the reason for the cap. `rust_decimal` has a 96 bit mantissa.
 
 | Kind | Count | Where |
 |---|---|---|
-| Unit tests | 105 | In each module |
-| Tests that run the compiled binary | 12 | `tests/cli.rs` |
+| Unit tests | 116 | In each module |
+| Tests that run the compiled binary | 13 | `tests/cli.rs` |
 
 The behaviors listed under Assumptions are covered by tests with descriptive names.
 
@@ -171,8 +176,9 @@ The sample data is in `tests/fixtures`. Each `<name>.csv` is an input. The match
 | `basic` | Deposits and withdrawals. One withdrawal fails. |
 | `disputes` | Dispute, resolve, a second dispute, chargeback, a locked account, a negative balance |
 | `ignored_rows` | Rows the specification says to ignore |
-| `bad_rows` | Twelve faulty rows |
-| `formatting` | Mixed case, extra whitespace, unusual number forms, quoted fields, extra fields |
+| `bad_rows` | Fifteen faulty rows |
+| `formatting` | Mixed case, extra whitespace, unusual number forms, extra fields on a dispute |
+| `swapped_header` | A header in the wrong order. The run must fail. There is no expected output. |
 | `no_header` | A file that starts with a transaction |
 | `precision` | Sums that floats get wrong and a 20 digit amount |
 | `empty` | An empty file |
@@ -196,7 +202,7 @@ Errors fall into three groups.
 | Rejected transaction | See below | No balance changes. Processing continues. |
 | Fatal error | The file cannot be opened or read. The output cannot be written. | The run stops with a nonzero exit code. |
 
-A rejected transaction is logged only when it means the data is wrong: a missing amount, a reused transaction ID or a balance beyond the cap. Insufficient funds, a locked account and an ignored dispute, resolve or chargeback are ordinary outcomes. They are not logged.
+A rejected transaction is logged only when it means the data is wrong: a reused transaction ID or a balance beyond the cap. Insufficient funds, a locked account and an ignored dispute, resolve or chargeback are ordinary outcomes. They are not logged.
 
 One rejection cannot be caused by any input: held funds that do not cover a deposit under dispute. The account guards against it on its own. The engine never triggers that guard. It resolves or charges back only a deposit that is under dispute. Reaching the guard would mean the engine has a bug. The run then stops with an error and prints no accounts.
 
@@ -272,7 +278,8 @@ The specification asks what would change if the CSVs came from thousands of conc
 ## Known limits
 
 - **Log lines name the record. They do not name the line.** The record number counts rows from 1. A header counts as a record. Blank lines do not. In a file without blank lines the record number is the line number. The `csv` crate does not report a reliable line for a row that follows blank lines.
-- **Columns are read by position.** A header that lists the columns in another order is not supported.
+- **Columns are read by position.** A header that lists the columns in another order stops the run. It is not reordered.
+- **Quoted fields are not supported.** A quote is taken as part of the field.
 - **A row with invalid UTF-8 is rejected whole.** This holds even when the bad byte is in a field the transaction does not need.
 - **Some log text comes from dependencies.** A row with too few fields is explained in the words of the `csv` and `serde` crates.
 - **All state is in memory.** See [What is kept in memory](#what-is-kept-in-memory).

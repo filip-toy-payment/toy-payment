@@ -75,7 +75,7 @@ fn bad_rows_are_skipped_and_logged() {
 
     assert_eq!(
         logged_records(&diagnostics),
-        [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     );
 }
 
@@ -125,6 +125,15 @@ fn a_file_that_cannot_be_opened_is_an_error() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(text(output.stderr).starts_with("error: cannot open"));
+}
+
+#[test]
+fn a_header_with_swapped_columns_is_an_error() {
+    let output = run(&[&fixture("swapped_header.csv")]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(text(output.stderr).starts_with("error: unexpected header"));
 }
 
 #[test]

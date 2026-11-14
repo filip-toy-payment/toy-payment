@@ -6,9 +6,10 @@ deposit,4,4,5.
 deposit,5,5,1_000.25
 deposit,6,6,00012.3400
 
-"deposit","7","7","7.0001"
-deposit,8,8,3.0,extra,fields
+deposit,7,7,7.0001
+deposit,8,8,3.0
 dispute,8,8
-dispute,7,7,not-a-number
+dispute,7,7,not-a-number,extra,fields
 resolve,7,7,999
 WITHDRAWAL,1,9,0.5
+deposit,+9,0x10,1.00000000000000000000000000000000

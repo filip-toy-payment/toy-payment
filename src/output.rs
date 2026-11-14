@@ -50,17 +50,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::amount::Amount;
-
-    fn amount(text: &str) -> Amount {
-        text.parse().unwrap()
-    }
-
-    fn account_with(deposit: &str) -> Account {
-        let mut account = Account::default();
-        account.deposit(amount(deposit)).unwrap();
-        account
-    }
+    use crate::test_support::{Broken, account_with, amount};
 
     fn written(accounts: &[(u16, Account)]) -> String {
         let mut output = Vec::new();
@@ -69,19 +59,6 @@ mod tests {
             .map(|(client, account)| (ClientId(*client), account));
         write_accounts(&mut output, accounts).unwrap();
         String::from_utf8(output).unwrap()
-    }
-
-    /// A writer that always fails.
-    struct Broken;
-
-    impl Write for Broken {
-        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("pipe closed"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Err(io::Error::other("pipe closed"))
-        }
     }
 
     #[test]

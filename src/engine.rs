@@ -42,8 +42,11 @@ pub struct Engine {
 impl Engine {
     /// Applies one transaction.
     ///
-    /// The transaction either applies in full or changes no balance. In both
-    /// cases the client it names has an account afterwards.
+    /// The transaction either applies in full or changes no balance.
+    ///
+    /// A deposit or a withdrawal opens the account of the client it names.
+    /// That holds even when it is then rejected. A dispute, a resolve or a
+    /// chargeback never opens one.
     pub fn apply(&mut self, transaction: Transaction) -> Result<(), Rejection> {
         let Transaction {
             kind,
@@ -51,16 +54,44 @@ impl Engine {
             tx,
             amount,
         } = transaction;
-        let account = self.accounts.entry(client).or_default();
-        let store = &mut self.store;
 
         match kind {
-            Kind::Deposit => deposit(account, store, client, tx, amount),
-            Kind::Withdrawal => withdraw(account, store, tx, amount),
-            Kind::Dispute => dispute(account, store, client, tx),
-            Kind::Resolve => resolve(account, store, client, tx),
-            Kind::Chargeback => chargeback(account, store, client, tx),
+            Kind::Deposit => {
+                let amount = amount.ok_or(Rejection::MissingAmount)?;
+                let account = self.accounts.entry(client).or_default();
+                deposit(account, &mut self.store, client, tx, amount)
+            }
+            Kind::Withdrawal => {
+                let amount = amount.ok_or(Rejection::MissingAmount)?;
+                let account = self.accounts.entry(client).or_default();
+                withdraw(account, &mut self.store, tx, amount)
+            }
+            Kind::Dispute => {
+                let (account, deposit) = self.account_and_deposit(client, tx)?;
+                dispute(account, deposit)
+            }
+            Kind::Resolve => {
+                let (account, deposit) = self.account_and_deposit(client, tx)?;
+                resolve(account, deposit)
+            }
+            Kind::Chargeback => {
+                let (account, deposit) = self.account_and_deposit(client, tx)?;
+                chargeback(account, deposit)
+            }
         }
+    }
+
+    /// The deposit that a dispute, resolve or chargeback refers to and the
+    /// account it was credited to.
+    fn account_and_deposit(
+        &mut self,
+        client: ClientId,
+        tx: TxId,
+    ) -> Result<(&mut Account, &mut Deposit), Rejection> {
+        let deposit = self.store.deposit_owned_by(tx, client)?;
+        // The deposit was credited to this account. It exists already.
+        let account = self.accounts.entry(client).or_default();
+        Ok((account, deposit))
     }
 
     /// Every account. The order is unspecified.
@@ -76,9 +107,8 @@ fn deposit(
     store: &mut TransactionStore,
     client: ClientId,
     tx: TxId,
-    amount: Option<Amount>,
+    amount: Amount,
 ) -> Result<(), Rejection> {
-    let amount = amount.ok_or(Rejection::MissingAmount)?;
     // A reused ID is a data fault. It is reported even on a locked account.
     if store.contains(tx) {
         return Err(Rejection::DuplicateTransaction);
@@ -93,9 +123,8 @@ fn withdraw(
     account: &mut Account,
     store: &mut TransactionStore,
     tx: TxId,
-    amount: Option<Amount>,
+    amount: Amount,
 ) -> Result<(), Rejection> {
-    let amount = amount.ok_or(Rejection::MissingAmount)?;
     if store.contains(tx) {
         return Err(Rejection::DuplicateTransaction);
     }
@@ -105,13 +134,7 @@ fn withdraw(
     Ok(())
 }
 
-fn dispute(
-    account: &mut Account,
-    store: &mut TransactionStore,
-    client: ClientId,
-    tx: TxId,
-) -> Result<(), Rejection> {
-    let deposit = store.deposit_owned_by(tx, client)?;
+fn dispute(account: &mut Account, deposit: &mut Deposit) -> Result<(), Rejection> {
     match deposit.state {
         DepositState::Undisputed => {}
         DepositState::Disputed => return Err(Rejection::AlreadyDisputed),
@@ -123,13 +146,7 @@ fn dispute(
     Ok(())
 }
 
-fn resolve(
-    account: &mut Account,
-    store: &mut TransactionStore,
-    client: ClientId,
-    tx: TxId,
-) -> Result<(), Rejection> {
-    let deposit = store.deposit_owned_by(tx, client)?;
+fn resolve(account: &mut Account, deposit: &mut Deposit) -> Result<(), Rejection> {
     if deposit.state != DepositState::Disputed {
         return Err(Rejection::NotDisputed);
     }
@@ -140,13 +157,7 @@ fn resolve(
     Ok(())
 }
 
-fn chargeback(
-    account: &mut Account,
-    store: &mut TransactionStore,
-    client: ClientId,
-    tx: TxId,
-) -> Result<(), Rejection> {
-    let deposit = store.deposit_owned_by(tx, client)?;
+fn chargeback(account: &mut Account, deposit: &mut Deposit) -> Result<(), Rejection> {
     if deposit.state != DepositState::Disputed {
         return Err(Rejection::NotDisputed);
     }
@@ -223,20 +234,11 @@ impl TransactionStore {
 mod tests {
     use super::*;
     use crate::amount::ArithmeticError;
+    use crate::test_support::{self, CAP, transaction};
 
-    const CAP: &str = "7922816251426433759354395.0335";
     const LOCKED: Rejection = Rejection::Account(AccountError::Locked);
     const INSUFFICIENT_FUNDS: Rejection = Rejection::Account(AccountError::InsufficientFunds);
     const DUPLICATE: Rejection = Rejection::DuplicateTransaction;
-
-    fn transaction(kind: Kind, client: u16, tx: u32, amount: Option<&str>) -> Transaction {
-        Transaction {
-            kind,
-            client: ClientId(client),
-            tx: TxId(tx),
-            amount: amount.map(|text| text.parse().unwrap()),
-        }
-    }
 
     fn deposit(client: u16, tx: u32, amount: &str) -> Transaction {
         transaction(Kind::Deposit, client, tx, Some(amount))
@@ -273,12 +275,7 @@ mod tests {
 
     /// Available, held and total of a client as text.
     fn balances(engine: &Engine, client: u16) -> [String; 3] {
-        let account = account(engine, client).unwrap();
-        [
-            account.available().to_string(),
-            account.held().to_string(),
-            account.total().unwrap().to_string(),
-        ]
+        test_support::balances(account(engine, client).unwrap())
     }
 
     fn is_locked(engine: &Engine, client: u16) -> bool {
@@ -314,14 +311,29 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_transaction_still_opens_the_account() {
-        let mut engine = Engine::default();
+    fn a_rejected_deposit_or_withdrawal_still_opens_the_account() {
+        let mut engine = engine_after(&[deposit(1, 1, "5")]);
 
-        assert_eq!(engine.apply(withdrawal(7, 1, "1")), Err(INSUFFICIENT_FUNDS));
-        assert_eq!(engine.apply(dispute(8, 99)), Err(Rejection::UnknownDeposit));
+        assert_eq!(engine.apply(withdrawal(7, 2, "1")), Err(INSUFFICIENT_FUNDS));
+        assert_eq!(engine.apply(deposit(8, 1, "3")), Err(DUPLICATE));
 
         assert_eq!(balances(&engine, 7), ["0", "0", "0"]);
         assert_eq!(balances(&engine, 8), ["0", "0", "0"]);
+    }
+
+    #[test]
+    fn a_dispute_resolve_or_chargeback_never_opens_an_account() {
+        let mut engine = engine_after(&[deposit(1, 1, "5")]);
+
+        assert_eq!(engine.apply(dispute(7, 99)), Err(Rejection::UnknownDeposit));
+        assert_eq!(engine.apply(resolve(8, 99)), Err(Rejection::UnknownDeposit));
+        assert_eq!(
+            engine.apply(chargeback(9, 99)),
+            Err(Rejection::UnknownDeposit)
+        );
+        assert_eq!(engine.apply(dispute(10, 1)), Err(Rejection::ClientMismatch));
+
+        assert_eq!(engine.accounts().count(), 1);
     }
 
     #[test]
@@ -342,14 +354,18 @@ mod tests {
     }
 
     #[test]
-    fn a_deposit_without_an_amount_still_opens_the_account() {
+    fn a_deposit_or_withdrawal_without_an_amount_opens_no_account() {
         let mut engine = Engine::default();
 
         assert_eq!(
             engine.apply(transaction(Kind::Deposit, 7, 1, None)),
             Err(Rejection::MissingAmount)
         );
-        assert_eq!(balances(&engine, 7), ["0", "0", "0"]);
+        assert_eq!(
+            engine.apply(transaction(Kind::Withdrawal, 8, 2, None)),
+            Err(Rejection::MissingAmount)
+        );
+        assert_eq!(engine.accounts().count(), 0);
     }
 
     #[test]
@@ -460,9 +476,8 @@ mod tests {
         assert_eq!(balances(&engine, 1), ["0", "5", "5"]);
         assert!(!is_locked(&engine, 1));
 
-        // The client named on the rejected rows has an empty account.
-        assert_eq!(balances(&engine, 2), ["0", "0", "0"]);
-        assert!(!is_locked(&engine, 2));
+        // The client named on the rejected rows has no account.
+        assert!(account(&engine, 2).is_none());
     }
 
     #[test]

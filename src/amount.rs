@@ -51,11 +51,7 @@ impl FromStr for Amount {
     /// Trailing zeros past the fourth decimal place are accepted. Any other
     /// digit there is an error. The text must not have surrounding whitespace.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        // `from_str` would round a value that does not fit. The exact parser
-        // returns an error instead.
-        let value = Decimal::from_str_exact(text)
-            .map_err(|_| AmountError::Malformed)?
-            .normalize();
+        let value = parse_exact(text).ok_or(AmountError::Malformed)?.normalize();
 
         if value.scale() > DECIMAL_PLACES {
             return Err(AmountError::TooPrecise);
@@ -68,6 +64,22 @@ impl FromStr for Amount {
         }
         Ok(Self(value))
     }
+}
+
+/// Parses a decimal and refuses any input it would have to round.
+fn parse_exact(text: &str) -> Option<Decimal> {
+    // `from_str` would round a value that does not fit. The exact parser
+    // returns an error instead.
+    if let Ok(value) = Decimal::from_str_exact(text) {
+        return Some(value);
+    }
+
+    // The exact parser also refuses more than 28 decimal places. Trailing
+    // zeros in the fraction do not change the value.
+    if !text.contains('.') {
+        return None;
+    }
+    Decimal::from_str_exact(text.trim_end_matches('0')).ok()
 }
 
 /// A balance operation whose result would fall outside the cap.
@@ -123,12 +135,7 @@ impl fmt::Display for Balance {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const CAP_TEXT: &str = "7922816251426433759354395.0335";
-
-    fn amount(text: &str) -> Amount {
-        text.parse().unwrap()
-    }
+    use crate::test_support::{CAP as CAP_TEXT, amount};
 
     fn balance(text: &str) -> Balance {
         amount(text).into()
@@ -171,6 +178,26 @@ mod tests {
     fn accepts_trailing_zeros_past_four_decimal_places() {
         assert_eq!(amount("1.50000"), amount("1.5"));
         assert_eq!(amount("0.000100000000"), amount("0.0001"));
+    }
+
+    #[test]
+    fn accepts_any_number_of_trailing_zeros() {
+        let zeros = "0".repeat(40);
+
+        assert_eq!(amount(&format!("1.{zeros}")), amount("1"));
+        assert_eq!(amount(&format!("1.5{zeros}")), amount("1.5"));
+        assert_eq!(amount(&format!("{CAP_TEXT}{zeros}")), amount(CAP_TEXT));
+        assert_eq!(error(&format!("0.{zeros}")), AmountError::NotPositive);
+        assert_eq!(error(&format!("1.00001{zeros}")), AmountError::TooPrecise);
+    }
+
+    #[test]
+    fn trailing_zeros_of_a_whole_number_are_significant() {
+        // No fraction here. Dropping these zeros would change the value.
+        let digits = format!("1{}", "0".repeat(40));
+
+        assert_eq!(error(&digits), AmountError::Malformed);
+        assert_eq!(amount("100"), amount("100.0"));
     }
 
     #[test]

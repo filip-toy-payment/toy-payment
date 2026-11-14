@@ -10,20 +10,23 @@ pub mod input;
 pub mod output;
 pub mod transaction;
 
+#[cfg(test)]
+mod test_support;
+
 use std::io::{self, Read, Write};
 
 use thiserror::Error;
 
 use crate::account::AccountError;
 use crate::engine::{Engine, Rejection};
-use crate::input::Row;
+use crate::input::{InputError, Row};
 use crate::output::OutputError;
 
 /// Why a run ended without a complete result.
 #[derive(Debug, Error)]
 pub enum RunError {
-    #[error("cannot read input: {0}")]
-    Input(#[source] io::Error),
+    #[error(transparent)]
+    Input(#[from] InputError),
     #[error("cannot write diagnostics: {0}")]
     Diagnostics(#[source] io::Error),
     #[error(transparent)]
@@ -45,11 +48,11 @@ where
 {
     let mut engine = Engine::default();
 
-    for row in input::rows(input).map_err(RunError::Input)? {
+    for row in input::rows(input)? {
         let Row {
             record,
             transaction,
-        } = row.map_err(RunError::Input)?;
+        } = row.map_err(InputError::Io)?;
 
         let logged = match transaction {
             Err(error) => writeln!(diagnostics, "record {record}: {error}"),
@@ -111,9 +114,8 @@ impl Severity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{Broken, CAP};
     use std::io::BufWriter;
-
-    const CAP: &str = "7922816251426433759354395.0335";
 
     /// Output and diagnostics of a successful run.
     fn run_on(input: &str) -> (String, String) {
@@ -124,25 +126,6 @@ mod tests {
             String::from_utf8(output).unwrap(),
             String::from_utf8(diagnostics).unwrap(),
         )
-    }
-
-    /// A reader and writer that always fails.
-    struct Broken;
-
-    impl Read for Broken {
-        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("disk fault"))
-        }
-    }
-
-    impl Write for Broken {
-        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("pipe closed"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Err(io::Error::other("pipe closed"))
-        }
     }
 
     #[test]
@@ -218,9 +201,46 @@ mod tests {
 
     #[test]
     fn a_bad_row_creates_no_account() {
-        let (output, _) = run_on("bogus,7,1,1\ndeposit,8,2,abc\n");
+        let (output, diagnostics) = run_on(
+            "bogus,7,1,1\n\
+             deposit,8,2,abc\n\
+             deposit,9,3,\n\
+             deposit,10,4,1,000.50\n",
+        );
 
         assert_eq!(output, "client,available,held,total,locked\n");
+        assert_eq!(
+            diagnostics,
+            "record 1: unknown transaction type \"bogus\"\n\
+             record 2: amount is not a decimal number\n\
+             record 3: a deposit or withdrawal needs an amount\n\
+             record 4: a deposit or withdrawal must not have more than four fields\n"
+        );
+    }
+
+    #[test]
+    fn an_ignored_dispute_creates_no_account() {
+        let (output, diagnostics) = run_on("dispute,65535,1\nresolve,7,1\nchargeback,8,1\n");
+
+        assert_eq!(output, "client,available,held,total,locked\n");
+        assert_eq!(diagnostics, "");
+    }
+
+    #[test]
+    fn a_header_with_swapped_columns_ends_the_run_without_any_output() {
+        let mut output = Vec::new();
+
+        let result = run(
+            "type,tx,client,amount\ndeposit,100,7,5\n".as_bytes(),
+            &mut output,
+            io::sink(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(RunError::Input(InputError::UnexpectedHeader))
+        ));
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -229,7 +249,6 @@ mod tests {
             "deposit,1,1,5\n\
              deposit,1,1,5\n\
              withdrawal,1,1,1\n\
-             deposit,2,2,\n\
              deposit,3,3,{CAP}\n\
              deposit,3,4,0.0001\n"
         );
@@ -239,8 +258,7 @@ mod tests {
             diagnostics,
             "record 2: an earlier transaction already uses this ID\n\
              record 3: an earlier transaction already uses this ID\n\
-             record 4: a deposit or withdrawal needs an amount\n\
-             record 6: balance would exceed the largest supported value\n"
+             record 5: balance would exceed the largest supported value\n"
         );
     }
 
@@ -264,8 +282,7 @@ mod tests {
         assert_eq!(
             output,
             "client,available,held,total,locked\n\
-             1,0,0,0,true\n\
-             2,0,0,0,false\n"
+             1,0,0,0,true\n"
         );
         assert_eq!(diagnostics, "");
     }

@@ -20,6 +20,15 @@ pub struct Row {
     pub transaction: Result<Transaction, RowError>,
 }
 
+/// Why reading cannot start or continue.
+#[derive(Debug, Error)]
+pub enum InputError {
+    #[error("cannot read input: {0}")]
+    Io(#[from] io::Error),
+    #[error("unexpected header: the columns must be type, client, tx, amount")]
+    UnexpectedHeader,
+}
+
 /// Why a row is not a transaction. Later rows are unaffected.
 #[derive(Debug, PartialEq, Eq, Error)]
 pub enum RowError {
@@ -27,13 +36,18 @@ pub enum RowError {
     Malformed(String),
     #[error("unknown transaction type {0:?}")]
     UnknownKind(String),
+    #[error("a deposit or withdrawal needs an amount")]
+    MissingAmount,
+    #[error("a deposit or withdrawal must not have more than four fields")]
+    ExtraFields,
     #[error(transparent)]
     Amount(#[from] AmountError),
 }
 
-/// The columns of a row by position: type, client, tx, amount.
-///
-/// Fields after the fourth are dropped.
+/// The column names of a header. The columns are read in this order.
+const HEADER: [&str; 4] = ["type", "client", "tx", "amount"];
+
+/// The columns of a row by position.
 #[derive(Debug, Deserialize)]
 struct CsvRow {
     kind: String,
@@ -42,6 +56,9 @@ struct CsvRow {
     // A dispute, resolve or chargeback row may leave the column out entirely.
     #[serde(default)]
     amount: Option<String>,
+    /// The fifth field of a row that has one. Later fields are dropped.
+    #[serde(default)]
+    extra: Option<String>,
 }
 
 impl TryFrom<CsvRow> for Transaction {
@@ -51,9 +68,16 @@ impl TryFrom<CsvRow> for Transaction {
         let kind = parse_kind(&row.kind).ok_or(RowError::UnknownKind(row.kind))?;
         let amount = match kind {
             Kind::Deposit | Kind::Withdrawal => {
-                row.amount.as_deref().map(str::parse).transpose()?
+                // A fifth field makes the amount ambiguous. `1,000.50` would
+                // otherwise be read as 1.
+                if row.extra.is_some() {
+                    return Err(RowError::ExtraFields);
+                }
+                let text = row.amount.ok_or(RowError::MissingAmount)?;
+                Some(text.parse()?)
             }
-            // These kinds need no amount. Whatever the column holds is not examined.
+            // These kinds need no amount. Whatever the row holds after the
+            // third field is not examined.
             Kind::Dispute | Kind::Resolve | Kind::Chargeback => None,
         };
 
@@ -85,21 +109,22 @@ fn parse_kind(text: &str) -> Option<Kind> {
 ///
 /// A header line is optional. Each item is a row or an I/O error. Reading
 /// cannot continue after an I/O error.
-pub fn rows<R: Read>(input: R) -> io::Result<impl Iterator<Item = io::Result<Row>>> {
+pub fn rows<R: Read>(input: R) -> Result<impl Iterator<Item = io::Result<Row>>, InputError> {
     let mut reader = csv::ReaderBuilder::new()
         // The header is detected below. A file without one loses no row.
         .has_headers(false)
         .trim(csv::Trim::All)
         // Rows may have three fields or more than four.
         .flexible(true)
+        // A quote is an ordinary character. Quoting would let one stray quote
+        // swallow every later row into a single field.
+        .quoting(false)
         .from_reader(input);
 
     // `headers` returns the first record without consuming it.
     let has_header = match reader.headers() {
-        Ok(first) => first
-            .get(0)
-            .is_some_and(|field| field.eq_ignore_ascii_case("type")),
-        Err(error) if error.is_io_error() => return Err(into_io(error)),
+        Ok(first) => is_header(first)?,
+        Err(error) if error.is_io_error() => return Err(into_io(error).into()),
         // The first record is not valid text. It is reported as a bad row.
         Err(_) => false,
     };
@@ -110,6 +135,30 @@ pub fn rows<R: Read>(input: R) -> io::Result<impl Iterator<Item = io::Result<Row
         .skip(usize::from(has_header))
         .map(|(result, record)| to_row(record, result));
     Ok(rows)
+}
+
+/// Whether the first record is a header.
+///
+/// A record that starts with `type` is one. Its names must then be the
+/// expected ones in the expected order. Columns are read by position. A
+/// header with swapped columns would otherwise be misread without any error.
+fn is_header(first: &csv::StringRecord) -> Result<bool, InputError> {
+    let names_match = |record: &csv::StringRecord, count: usize| {
+        record.len() >= count
+            && HEADER
+                .iter()
+                .zip(record)
+                .take(count)
+                .all(|(name, field)| field.eq_ignore_ascii_case(name))
+    };
+
+    if !names_match(first, 1) {
+        return Ok(false);
+    }
+    if !names_match(first, HEADER.len()) {
+        return Err(InputError::UnexpectedHeader);
+    }
+    Ok(true)
 }
 
 fn to_row(record: u64, result: csv::Result<CsvRow>) -> io::Result<Row> {
@@ -147,6 +196,7 @@ fn into_io(error: csv::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::transaction;
 
     fn read(input: &str) -> Vec<Row> {
         read_bytes(input.as_bytes())
@@ -168,15 +218,6 @@ mod tests {
         let mut rows = read(input);
         assert_eq!(rows.len(), 1, "{input:?}");
         rows.remove(0).transaction.unwrap_err()
-    }
-
-    fn transaction(kind: Kind, client: u16, tx: u32, amount: Option<&str>) -> Transaction {
-        Transaction {
-            kind,
-            client: ClientId(client),
-            tx: TxId(tx),
-            amount: amount.map(|text| text.parse().unwrap()),
-        }
     }
 
     /// A reader that fails once the given number of bytes has been read.
@@ -235,6 +276,32 @@ mod tests {
             let rows = read(&format!("{header}\ndeposit,1,1,1.0\n"));
             assert_eq!(rows.len(), 1, "{header}");
         }
+    }
+
+    #[test]
+    fn a_header_with_other_columns_stops_the_run() {
+        for header in [
+            "type,tx,client,amount",
+            "type,client,amount,tx",
+            "type,client,tx",
+            "type,client,tx,value",
+            "type",
+        ] {
+            let input = format!("{header}\ndeposit,1,1,1.0\n");
+            let result = rows(input.as_bytes());
+            assert!(
+                matches!(result, Err(InputError::UnexpectedHeader)),
+                "{header}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_may_name_more_than_four_columns() {
+        let rows = read("type,client,tx,amount,note\ndispute,1,1,,late\n");
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].transaction.is_ok());
     }
 
     #[test]
@@ -314,11 +381,24 @@ mod tests {
     }
 
     #[test]
-    fn reads_quoted_fields() {
+    fn a_quote_is_an_ordinary_character() {
         assert_eq!(
-            one("\"deposit\",\"1\",\"2\",\"3.5\"\n"),
-            transaction(Kind::Deposit, 1, 2, Some("3.5"))
+            one_error("\"deposit\",1,2,3.5\n"),
+            RowError::UnknownKind("\"deposit\"".to_owned())
         );
+    }
+
+    #[test]
+    fn a_stray_quote_damages_only_its_own_row() {
+        let rows = read("deposit,1,1,\"5\ndeposit,1,2,3\ndeposit,2,3,4\n");
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0].transaction,
+            Err(RowError::Amount(AmountError::Malformed))
+        );
+        assert!(rows[1].transaction.is_ok());
+        assert!(rows[2].transaction.is_ok());
     }
 
     #[test]
@@ -348,16 +428,14 @@ mod tests {
     }
 
     #[test]
-    fn a_deposit_or_withdrawal_without_an_amount_is_still_a_transaction() {
-        assert_eq!(
-            one("deposit,1,1,\n"),
-            transaction(Kind::Deposit, 1, 1, None)
-        );
-        assert_eq!(one("deposit,1,1\n"), transaction(Kind::Deposit, 1, 1, None));
-        assert_eq!(
-            one("withdrawal,1,1,  \n"),
-            transaction(Kind::Withdrawal, 1, 1, None)
-        );
+    fn rejects_a_deposit_or_withdrawal_without_an_amount() {
+        for row in ["deposit,1,1,", "deposit,1,1", "withdrawal,1,1,  "] {
+            assert_eq!(
+                one_error(&format!("{row}\n")),
+                RowError::MissingAmount,
+                "{row}"
+            );
+        }
     }
 
     #[test]
@@ -423,11 +501,39 @@ mod tests {
     }
 
     #[test]
-    fn drops_fields_after_the_fourth() {
+    fn rejects_a_deposit_or_withdrawal_with_more_than_four_fields() {
+        for row in [
+            "deposit,1,1,2.5,extra",
+            "deposit,1,1,2.5,extra,more",
+            "withdrawal,1,1,2.5,extra",
+        ] {
+            assert_eq!(
+                one_error(&format!("{row}\n")),
+                RowError::ExtraFields,
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_comma_inside_an_amount_is_not_read_as_a_smaller_amount() {
+        assert_eq!(one_error("deposit,1,1,1,000.50\n"), RowError::ExtraFields);
+    }
+
+    #[test]
+    fn an_empty_fifth_field_is_harmless() {
         assert_eq!(
-            one("deposit,1,1,2.5,extra,more\n"),
+            one("deposit,1,1,2.5,\n"),
             transaction(Kind::Deposit, 1, 1, Some("2.5"))
         );
+    }
+
+    #[test]
+    fn extra_fields_on_a_dispute_row_are_dropped() {
+        for kind in ["dispute", "resolve", "chargeback"] {
+            let row = one(&format!("{kind},1,5,,extra,more\n"));
+            assert_eq!(row.amount, None, "{kind}");
+        }
     }
 
     #[test]
@@ -462,7 +568,7 @@ mod tests {
             remaining: 0,
         };
 
-        assert!(rows(reader).is_err());
+        assert!(matches!(rows(reader), Err(InputError::Io(_))));
     }
 
     #[test]

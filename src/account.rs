@@ -128,27 +128,7 @@ impl Account {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const CAP: &str = "7922816251426433759354395.0335";
-
-    fn amount(text: &str) -> Amount {
-        text.parse().unwrap()
-    }
-
-    /// Available, held and total as text.
-    fn balances(account: &Account) -> [String; 3] {
-        [
-            account.available().to_string(),
-            account.held().to_string(),
-            account.total().unwrap().to_string(),
-        ]
-    }
-
-    fn account_with(deposit: &str) -> Account {
-        let mut account = Account::default();
-        account.deposit(amount(deposit)).unwrap();
-        account
-    }
+    use crate::test_support::{CAP, account_with, amount, balances};
 
     #[test]
     fn a_new_account_is_empty_and_unlocked() {
