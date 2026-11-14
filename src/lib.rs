@@ -4,3 +4,4 @@
 //! reports the final state of every account.
 
 pub mod amount;
+pub mod transaction;
