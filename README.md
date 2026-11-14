@@ -124,7 +124,7 @@ The parser is flexible about form. A row that holds the data its transaction typ
 | Whitespace around fields | Trimmed. |
 | Case of the type | Ignored. `DEPOSIT` and `Deposit` are deposits. |
 | Dispute, resolve and chargeback rows | May have three fields or four. |
-| More than four fields | A deposit or withdrawal is rejected. Its amount is then ambiguous. `1,000.50` would otherwise be read as 1. A dispute, resolve or chargeback ignores the extra fields. |
+| More than four fields | A deposit or withdrawal with text in any field after the amount is rejected. Its amount is then ambiguous. `1,000.50` would otherwise be read as 1. Empty fields after the amount are tolerated, such as a trailing comma. A dispute, resolve or chargeback ignores the extra fields. |
 | Quotes | Standard CSV quoting. A field may be wrapped in double quotes. A quote that is opened and never closed is a known limit. See [Known limits](#known-limits). |
 | Client and tx numbers | Read by the `csv` crate. It also accepts a leading plus sign and hexadecimal such as `0x10`. |
 | Blank lines | Skipped. |
@@ -176,8 +176,8 @@ The sample data is in `tests/fixtures`. Each `<name>.csv` is an input. The match
 | `basic` | Deposits and withdrawals. One withdrawal fails. |
 | `disputes` | Dispute, resolve, a second dispute, chargeback, a locked account, a negative balance |
 | `ignored_rows` | Rows the specification says to ignore |
-| `bad_rows` | Thirteen faulty rows |
-| `formatting` | Mixed case, extra whitespace, unusual number forms, quoted fields, extra fields on a dispute |
+| `bad_rows` | Fourteen faulty rows |
+| `formatting` | Mixed case, extra whitespace, unusual number forms, quoted fields, trailing commas, extra fields on a dispute |
 | `swapped_header` | A header in the wrong order. The run must fail. There is no expected output. |
 | `no_header` | A file that starts with a transaction |
 | `precision` | Sums that floats get wrong and a 20 digit amount |

@@ -214,7 +214,7 @@ mod tests {
             "record 1: unknown transaction type \"bogus\"\n\
              record 2: amount is not a decimal number\n\
              record 3: a deposit or withdrawal needs an amount\n\
-             record 4: a deposit or withdrawal must not have more than four fields\n"
+             record 4: a deposit or withdrawal must not have data after its amount\n"
         );
     }
 

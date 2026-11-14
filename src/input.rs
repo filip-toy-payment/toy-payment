@@ -38,7 +38,7 @@ pub enum RowError {
     UnknownKind(String),
     #[error("a deposit or withdrawal needs an amount")]
     MissingAmount,
-    #[error("a deposit or withdrawal must not have more than four fields")]
+    #[error("a deposit or withdrawal must not have data after its amount")]
     ExtraFields,
     #[error(transparent)]
     Amount(#[from] AmountError),
@@ -56,9 +56,9 @@ struct CsvRow {
     // A dispute, resolve or chargeback row may leave the column out entirely.
     #[serde(default)]
     amount: Option<String>,
-    /// The fifth field of a row that has one. Later fields are dropped.
+    /// Every field after the fourth.
     #[serde(default)]
-    extra: Option<String>,
+    extra: Vec<String>,
 }
 
 impl TryFrom<CsvRow> for Transaction {
@@ -68,9 +68,9 @@ impl TryFrom<CsvRow> for Transaction {
         let kind = parse_kind(&row.kind).ok_or(RowError::UnknownKind(row.kind))?;
         let amount = match kind {
             Kind::Deposit | Kind::Withdrawal => {
-                // A fifth field makes the amount ambiguous. `1,000.50` would
-                // otherwise be read as 1.
-                if row.extra.is_some() {
+                // Text after the amount makes the amount ambiguous. `1,000.50`
+                // would otherwise be read as 1. Empty fields carry no data.
+                if row.extra.iter().any(|field| !field.is_empty()) {
                     return Err(RowError::ExtraFields);
                 }
                 let text = row.amount.ok_or(RowError::MissingAmount)?;
@@ -495,6 +495,10 @@ mod tests {
             "deposit,1,1,2.5,extra",
             "deposit,1,1,2.5,extra,more",
             "withdrawal,1,1,2.5,extra",
+            "deposit,1,1,2.5,,extra",
+            "deposit,1,1,2.5,,,,extra",
+            "deposit,1,1,2.5, ,extra",
+            "withdrawal,1,1,2.5,,extra,",
         ] {
             assert_eq!(
                 one_error(&format!("{row}\n")),
@@ -510,11 +514,18 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_fifth_field_is_harmless() {
-        assert_eq!(
-            one("deposit,1,1,2.5,\n"),
-            transaction(Kind::Deposit, 1, 1, Some("2.5"))
-        );
+    fn empty_fields_after_the_amount_are_tolerated() {
+        for row in [
+            "deposit,1,1,2.5,",
+            "deposit,1,1,2.5,,",
+            "deposit,1,1,2.5, ,  ,",
+        ] {
+            assert_eq!(
+                one(&format!("{row}\n")),
+                transaction(Kind::Deposit, 1, 1, Some("2.5")),
+                "{row}"
+            );
+        }
     }
 
     #[test]
