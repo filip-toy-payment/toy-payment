@@ -124,7 +124,7 @@ pub fn rows<R: Read>(input: R) -> Result<impl Iterator<Item = io::Result<Row>>, 
     // `headers` returns the first record without consuming it.
     let has_header = match reader.headers() {
         Ok(first) => is_header(first)?,
-        Err(error) if error.is_io_error() => return Err(into_io(error).into()),
+        Err(error) if error.is_io_error() => return Err(io::Error::from(error).into()),
         // The first record is not valid text. It is reported as a bad row.
         Err(_) => false,
     };
@@ -164,7 +164,7 @@ fn is_header(first: &csv::StringRecord) -> Result<bool, InputError> {
 fn to_row(record: u64, result: csv::Result<CsvRow>) -> io::Result<Row> {
     let transaction = match result {
         Ok(row) => Transaction::try_from(row),
-        Err(error) if error.is_io_error() => return Err(into_io(error)),
+        Err(error) if error.is_io_error() => return Err(error.into()),
         Err(error) => Err(RowError::Malformed(describe(&error))),
     };
     Ok(Row {
@@ -183,13 +183,6 @@ fn describe(error: &csv::Error) -> String {
         },
         csv::ErrorKind::Utf8 { .. } => "row is not valid UTF-8".to_owned(),
         _ => error.to_string(),
-    }
-}
-
-fn into_io(error: csv::Error) -> io::Error {
-    match error.into_kind() {
-        csv::ErrorKind::Io(error) => error,
-        other => io::Error::other(format!("{other:?}")),
     }
 }
 

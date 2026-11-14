@@ -108,10 +108,7 @@ impl Account {
 
     /// Removes a held amount for good and locks the account.
     pub fn charge_back(&mut self, amount: Amount) -> Result<(), AccountError> {
-        let held = self.held_without(amount.into())?;
-        self.available.checked_add(held)?;
-
-        self.held = held;
+        self.held = self.held_without(amount.into())?;
         self.locked = true;
         Ok(())
     }
