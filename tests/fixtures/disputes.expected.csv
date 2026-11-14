@@ -1,0 +1,4 @@
+client,available,held,total,locked
+1,0,10,10,true
+2,-15,20,5,false
+3,0,0,0,true
